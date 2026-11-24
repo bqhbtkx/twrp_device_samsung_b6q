@@ -1,0 +1,13 @@
+# Samsung SM8650 Z Flip 6 (b6q) TWRP Flags
+/boot           emmc    /dev/block/bootdevice/by-name/boot          flags=backup=1;display="Boot";flashimg=1
+/recovery       emmc    /dev/block/bootdevice/by-name/recovery      flags=backup=1;display="Recovery";flashimg=1
+/init_boot      emmc    /dev/block/bootdevice/by-name/init_boot     flags=backup=1;display="Init Boot";flashimg=1
+/vendor_boot    emmc    /dev/block/bootdevice/by-name/vendor_boot   flags=backup=1;display="Vendor Boot";flashimg=1
+/dtbo           emmc    /dev/block/bootdevice/by-name/dtbo          flags=backup=1;display="DTBO";flashimg=1
+/efs            ext4    /dev/block/bootdevice/by-name/sec_efs       flags=backup=1;display="EFS"
+/sec_efs        ext4    /dev/block/bootdevice/by-name/sec_efs       flags=backup=1;subpartitionof=/efs
+/metadata       f2fs    /dev/block/by-name/metadata                 flags=backup=1;display="Metadata"
+/misc           emmc    /dev/block/bootdevice/by-name/misc          flags=backup=1;display="Misc"
+
+# Removable storage
+/usb-otg        vfat    /dev/block/sdg1 /dev/block/sdg              flags=display="USB-OTG";storage;wipeingui;removable
