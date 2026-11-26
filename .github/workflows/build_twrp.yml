@@ -71,7 +71,16 @@ jobs:
           cd "$BUILD_ROOT"
           export ALLOW_MISSING_DEPENDENCIES=true
           source build/envsetup.sh
-          lunch twrp_b6q-eng
+          ls -la build/release/build_config/ || true
+          if [ -f build/release/build_config/ap2a.scl ]; then
+            REL_CFG=ap2a
+          elif [ -f build/release/build_config/ap1a.scl ]; then
+            REL_CFG=ap1a
+          else
+            REL_CFG=trunk_staging
+          fi
+          echo "Using release config: $REL_CFG"
+          lunch "twrp_b6q-${REL_CFG}-eng"
           mka recoveryimage -j$(nproc)
 
       - name: Package Odin tars and vbmeta_disabled
