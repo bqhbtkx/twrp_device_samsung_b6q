@@ -1,0 +1,16 @@
+import /init.recovery.qcom.rc
+import /init.recovery.samsung.rc
+
+on early-init
+    # Load essential stock kernel modules (storage, USB, display, fold touchscreen)
+    exec u:r:recovery:s0 -- /system/bin/modprobe -a -d /lib/modules \
+        ufs_qcom phy-qcom-ufs phy-qcom-ufs-qmp-v4-pineapple ufshcd-crypto-qti \
+        dwc3-msm phy-msm-ssusb-qmp phy-msm-snps-eusb2 \
+        msm_drm synaptics_spi_fold synaptics_i2c_fold
+
+on init
+    setprop sys.usb.controller a600000.dwc3
+
+on property:twrp.modules.loaded=true
+    # Trigger brightness once panel is up
+    write /sys/class/backlight/panel0-backlight/brightness 180

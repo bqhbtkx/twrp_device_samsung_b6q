@@ -1,0 +1,26 @@
+# Recovery USB & Hardware Properties (extracted from SM-F741BXXS2CYL5)
+ro.recovery.usb.vid=18D1
+ro.recovery.usb.adb.pid=D001
+ro.recovery.usb.fastboot.pid=4EE0
+
+# Dynamic Partitions & Non-A/B
+ro.boot.dynamic_partitions=true
+ro.build.ab_update=false
+
+# Display
+ro.minui.pixel_format=RGBX_8888
+ro.sf.lcd_density=480
+ro.surface_flinger.sub_lcd_density=340
+
+# Crypto / Gatekeeper / Keystore
+ro.crypto.metadata_init_delete_all_keys.enabled=true
+vendor.gatekeeper.is_security_level_spu=0
+ro.hardware.keystore=mdfpp
+ro.hardware.gatekeeper=mdfpp
+ro.hardware.keystore_desede=true
+
+# Platform
+ro.product.board=pineapple
+ro.board.platform=pineapple
+ro.soc.manufacturer=QTI
+vendor.usb.controller=a600000.dwc3
