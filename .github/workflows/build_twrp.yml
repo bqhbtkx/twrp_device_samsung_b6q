@@ -50,14 +50,14 @@ jobs:
         with:
           path: dt_b6q
 
-      - name: Sync TWRP 14.1 source
+      - name: Sync TWRP 12.1 source
         run: |
           mkdir -p "$BUILD_ROOT"
           cd "$BUILD_ROOT"
           git config --global user.name "TWRP CI"
           git config --global user.email "ci@localhost"
           git config --global color.ui false
-          repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b twrp-14.1
+          repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b twrp-12.1
           repo sync -c --no-clone-bundle --no-tags -j$(nproc)
 
       - name: Place device tree
@@ -71,16 +71,7 @@ jobs:
           cd "$BUILD_ROOT"
           export ALLOW_MISSING_DEPENDENCIES=true
           source build/envsetup.sh
-          ls -la build/release/build_config/ || true
-          if [ -f build/release/build_config/ap2a.scl ]; then
-            REL_CFG=ap2a
-          elif [ -f build/release/build_config/ap1a.scl ]; then
-            REL_CFG=ap1a
-          else
-            REL_CFG=trunk_staging
-          fi
-          echo "Using release config: $REL_CFG"
-          lunch "twrp_b6q-${REL_CFG}-eng"
+          lunch twrp_b6q-eng
           mka recoveryimage -j$(nproc)
 
       - name: Package Odin tars and vbmeta_disabled
