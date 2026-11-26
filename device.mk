@@ -6,8 +6,8 @@
 
 DEVICE_PATH := device/samsung/b6q
 
-# Shipping API level
-PRODUCT_SHIPPING_API_LEVEL := 34
+# Shipping API level (capped to 32 for twrp-12.1 SDK compatibility; device shipped with 34)
+PRODUCT_SHIPPING_API_LEVEL := 32
 
 # Dynamic partitions
 PRODUCT_USE_DYNAMIC_PARTITIONS := true
