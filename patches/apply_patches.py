@@ -28,14 +28,78 @@ def patch_events(path: pathlib.Path) -> None:
         raise SystemExit(f"ERROR: include anchor not found in {path}")
 
     helpers = """#include <fstream>
+#include <errno.h>
 #include <pthread.h>
 #include <time.h>
 
 static pthread_mutex_t b6q_vib_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t b6q_vib_cond;
+static bool b6q_vib_cond_init = false;
+static bool b6q_vib_thread_started = false;
+static bool b6q_vib_stop_thread = false;
+static bool b6q_vib_cont_active = false;
+static struct timespec b6q_vib_stop_ts = {0, 0};
+static pthread_t b6q_vib_thread;
 static int b6q_vib_fd = -1;
 static int b6q_vib_effect_id = -1;
+static bool b6q_vib_ff_failed = false;
+static char b6q_vib_cont_path[256] = {0};
 static volatile int b6q_folded_cached = 0;
 static struct timespec b6q_last_fold_poll = {0, 0};
+
+static void b6q_write_cont(const char *val) {
+    if (b6q_vib_cont_path[0] == '\\0') return;
+    int fd = open(b6q_vib_cont_path, O_WRONLY);
+    if (fd >= 0) {
+        ssize_t n = write(fd, val, strlen(val));
+        (void)n;
+        close(fd);
+    }
+}
+
+static void *b6q_vib_worker(void *arg __unused) {
+    pthread_mutex_lock(&b6q_vib_lock);
+    while (!b6q_vib_stop_thread) {
+        if (!b6q_vib_cont_active) {
+            pthread_cond_wait(&b6q_vib_cond, &b6q_vib_lock);
+            continue;
+        }
+        struct timespec target = b6q_vib_stop_ts;
+        int rc = pthread_cond_timedwait(&b6q_vib_cond, &b6q_vib_lock, &target);
+        if (b6q_vib_stop_thread) break;
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (rc == ETIMEDOUT ||
+            now.tv_sec > b6q_vib_stop_ts.tv_sec ||
+            (now.tv_sec == b6q_vib_stop_ts.tv_sec && now.tv_nsec >= b6q_vib_stop_ts.tv_nsec)) {
+            b6q_vib_cont_active = false;
+            b6q_write_cont("0");
+        }
+    }
+    if (b6q_vib_cont_active) {
+        b6q_vib_cont_active = false;
+        b6q_write_cont("0");
+    }
+    pthread_mutex_unlock(&b6q_vib_lock);
+    return nullptr;
+}
+
+static void b6q_ensure_vib_thread_locked(void) {
+    if (!b6q_vib_cond_init) {
+        pthread_condattr_t attr;
+        pthread_condattr_init(&attr);
+        pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+        pthread_cond_init(&b6q_vib_cond, &attr);
+        pthread_condattr_destroy(&attr);
+        b6q_vib_cond_init = true;
+    }
+    if (!b6q_vib_thread_started) {
+        b6q_vib_stop_thread = false;
+        if (pthread_create(&b6q_vib_thread, nullptr, b6q_vib_worker, nullptr) == 0) {
+            b6q_vib_thread_started = true;
+        }
+    }
+}
 
 static bool b6q_read_fold_sysfs(void) {
     int fd = open("/sys/class/sec/hall_ic/flip_status", O_RDONLY);
@@ -66,7 +130,7 @@ static bool b6q_is_folded(void) {
 """
     src = src.replace(inc_target, helpers, 1)
 
-    # 2. Replace vibrate() body to support sec_vibrator_inputff (FF_CONSTANT) first
+    # 2. Replace vibrate() body to support sec_vibrator_inputff (FF_CONSTANT or cont sysfs)
     vib_anchor = """int vibrate(int timeout_ms)
 {
     if (timeout_ms > 10000) timeout_ms = 1000;"""
@@ -79,7 +143,7 @@ static bool b6q_is_folded(void) {
     if (timeout_ms > 10000) timeout_ms = 1000;
 
     pthread_mutex_lock(&b6q_vib_lock);
-    if (b6q_vib_fd >= 0) {
+    if (b6q_vib_fd >= 0 && !b6q_vib_ff_failed) {
         struct input_event gain_ev;
         memset(&gain_ev, 0, sizeof(gain_ev));
         gain_ev.type = EV_FF;
@@ -95,16 +159,14 @@ static bool b6q_is_folded(void) {
         effect.replay.length = (uint16_t)timeout_ms;
         effect.replay.delay = 0;
         effect.u.constant.level = 0x7FFF;
-        if (ioctl(b6q_vib_fd, EVIOCSFF, &effect) < 0 && b6q_vib_effect_id != -1) {
+        int ff_rc = ioctl(b6q_vib_fd, EVIOCSFF, &effect);
+        if (ff_rc < 0 && b6q_vib_effect_id != -1) {
             b6q_vib_effect_id = -1;
             effect.id = -1;
-            if (ioctl(b6q_vib_fd, EVIOCSFF, &effect) == 0) {
-                b6q_vib_effect_id = effect.id;
-            }
-        } else {
-            b6q_vib_effect_id = effect.id;
+            ff_rc = ioctl(b6q_vib_fd, EVIOCSFF, &effect);
         }
-        if (b6q_vib_effect_id >= 0) {
+        if (ff_rc == 0 && effect.id >= 0) {
+            b6q_vib_effect_id = effect.id;
             struct input_event play;
             memset(&play, 0, sizeof(play));
             play.type = EV_FF;
@@ -115,6 +177,22 @@ static bool b6q_is_folded(void) {
             pthread_mutex_unlock(&b6q_vib_lock);
             return 0;
         }
+        b6q_vib_ff_failed = true;
+    }
+    if (b6q_vib_cont_path[0] != '\\0') {
+        int dur = timeout_ms;
+        if (dur > 1000) dur = 1000;
+        b6q_ensure_vib_thread_locked();
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long long nsec = (long long)now.tv_nsec + (long long)dur * 1000000LL;
+        b6q_vib_stop_ts.tv_sec = now.tv_sec + (time_t)(nsec / 1000000000LL);
+        b6q_vib_stop_ts.tv_nsec = (long)(nsec % 1000000000LL);
+        b6q_write_cont("1");
+        b6q_vib_cont_active = true;
+        pthread_cond_signal(&b6q_vib_cond);
+        pthread_mutex_unlock(&b6q_vib_lock);
+        return 0;
     }
     pthread_mutex_unlock(&b6q_vib_lock);"""
     src = src.replace(vib_anchor, vib_replacement, 1)
@@ -151,7 +229,7 @@ static bool b6q_is_folded(void) {
 """
     src = src[:s_idx] + new_block + src[e_idx:]
 
-    # 4. In ev_init(), open sec_vibrator_inputff O_RDWR for FF ioctls
+    # 4. In ev_init(), open sec_vibrator_inputff O_RDWR for FF ioctls and resolve cont sysfs path
     ev_init_anchor = """            /* Load virtualkeys if there are any */
             vk_init(&evs[ev_count]);"""
     if ev_init_anchor not in src:
@@ -164,12 +242,21 @@ static bool b6q_is_folded(void) {
                 if (b6q_vib_fd < 0) {
                     b6q_vib_fd = openat(dirfd(dir), de->d_name, O_RDWR);
                     b6q_vib_effect_id = -1;
+                    b6q_vib_ff_failed = false;
+                }
+                if (b6q_vib_cont_path[0] == '\\0') {
+                    char cand[256];
+                    snprintf(cand, sizeof(cand), "/sys/class/input/%s/device/cont", de->d_name);
+                    if (access(cand, W_OK) == 0) {
+                        snprintf(b6q_vib_cont_path, sizeof(b6q_vib_cont_path), "%s", cand);
+                        LOGI("Found vibrator cont sysfs: %s\\n", b6q_vib_cont_path);
+                    }
                 }
                 pthread_mutex_unlock(&b6q_vib_lock);
             }"""
     src = src.replace(ev_init_anchor, ev_init_repl, 1)
 
-    # 5. In ev_exit(), close b6q_vib_fd
+    # 5. In ev_exit(), stop vibrator worker thread and close b6q_vib_fd
     ev_exit_anchor = """void ev_exit(void)
 {"""
     if ev_exit_anchor not in src:
@@ -177,12 +264,23 @@ static bool b6q_is_folded(void) {
     ev_exit_repl = """void ev_exit(void)
 {
     pthread_mutex_lock(&b6q_vib_lock);
+    bool join_thread = b6q_vib_thread_started;
+    if (join_thread) {
+        b6q_vib_stop_thread = true;
+        if (b6q_vib_cond_init) pthread_cond_signal(&b6q_vib_cond);
+    }
     if (b6q_vib_fd >= 0) {
         close(b6q_vib_fd);
         b6q_vib_fd = -1;
         b6q_vib_effect_id = -1;
     }
-    pthread_mutex_unlock(&b6q_vib_lock);"""
+    pthread_mutex_unlock(&b6q_vib_lock);
+    if (join_thread) {
+        pthread_join(b6q_vib_thread, nullptr);
+        pthread_mutex_lock(&b6q_vib_lock);
+        b6q_vib_thread_started = false;
+        pthread_mutex_unlock(&b6q_vib_lock);
+    }"""
     src = src.replace(ev_exit_anchor, ev_exit_repl, 1)
 
     # 6. In vk_modify(), handle "flip" SW_LID and route only active screen touch
@@ -324,6 +422,18 @@ static void b6q_apply_backlights(bool folded) {
     b6q_write_sysfs("/sys/class/backlight/panel1-backlight/brightness", "0");
     snprintf(buf, sizeof(buf), "%d", saved);
     b6q_write_sysfs("/sys/class/backlight/panel0-backlight/brightness", buf);
+  }
+}
+
+static void b6q_set_dpms(uint32_t dpms_mode) {
+  if (!main_monitor_connector || drm_fd < 0) return;
+  uint32_t prop_id = 0;
+  find_prop_id(&conn_res, connector, Connector, main_monitor_connector->connector_id, "DPMS", prop_id);
+  if (prop_id) {
+    int rc = drmModeConnectorSetProperty(drm_fd, main_monitor_connector->connector_id, prop_id, dpms_mode);
+    if (rc) {
+      printf("b6q: DPMS=%u failed rc=%d\n", dpms_mode, rc);
+    }
   }
 }
 
@@ -564,16 +674,17 @@ static int drm_enable_crtc(drmModeAtomicReqPtr atomic_req) {
   return setup_pipeline(atomic_req);
 }
 
-static void drm_blank(minui_backend* backend __unused, bool blank) {
+static int b6q_drm_set_blank(bool blank) {
   int ret = 0;
 
   if (blank == current_blank_state)
-    return;
+    return 0;
 
   drmModeAtomicReqPtr atomic_req = drmModeAtomicAlloc();
   if (!atomic_req) {
     printf("Atomic Alloc failed\n");
-    return;
+    fflush(stdout);
+    return -ENOMEM;
   }
 
   if (blank)
@@ -585,13 +696,22 @@ static void drm_blank(minui_backend* backend __unused, bool blank) {
     ret = drmModeAtomicCommit(drm_fd, atomic_req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
 
   if (!ret) {
-    printf("Atomic Commit succeed\n");
+    printf("Atomic Commit succeed (blank=%d %dx%d)\n",
+           blank ? 1 : 0, main_monitor_crtc->mode.hdisplay, main_monitor_crtc->mode.vdisplay);
     current_blank_state = blank;
+    b6q_set_dpms(blank ? 3 : 0);
   } else {
-    printf("Atomic Commit failed, rc = %d\n", ret);
+    printf("Atomic Commit failed, rc = %d (blank=%d %dx%d)\n",
+           ret, blank ? 1 : 0, main_monitor_crtc->mode.hdisplay, main_monitor_crtc->mode.vdisplay);
   }
+  fflush(stdout);
 
   drmModeAtomicFree(atomic_req);
+  return ret;
+}
+
+static void drm_blank(minui_backend* backend __unused, bool blank) {
+  (void)b6q_drm_set_blank(blank);
 }
 
 static void drm_destroy_surface(struct drm_surface *surface) {
@@ -720,6 +840,7 @@ static drm_surface *drm_create_surface(int width, int height) {
     drm_destroy_surface(surface);
     return nullptr;
   }
+  memset(surface->base.data, 0, surface->base.height * surface->base.row_bytes);
 
   return surface;
 }
@@ -781,8 +902,18 @@ static bool b6q_is_cursor_plane(int fd, drmModeObjectProperties *props, drmModeP
   return false;
 }
 
+static bool b6q_plane_excluded(uint32_t plane_id, const uint32_t *exclude_ids, uint32_t exclude_count) {
+  for (uint32_t k = 0; k < exclude_count; ++k) {
+    if (exclude_ids[k] == plane_id) return true;
+  }
+  return false;
+}
+
 static bool b6q_init_display(drmModeRes *res, drmModeConnector *connector,
-                             uint32_t exclude_crtc_id, struct B6qDrmDisplay *out) {
+                             uint32_t exclude_crtc_id,
+                             const uint32_t *exclude_plane_ids,
+                             uint32_t exclude_plane_count,
+                             struct B6qDrmDisplay *out) {
   memset(out, 0, sizeof(*out));
   if (!connector || connector->count_modes <= 0) return false;
 
@@ -823,7 +954,8 @@ static bool b6q_init_display(drmModeRes *res, drmModeConnector *connector,
     out->conn_res.props_info[j] = drmModeGetProperty(drm_fd, out->conn_res.props->props[j]);
     if (!strcmp(out->conn_res.props_info[j]->name, "mode_properties")) {
       out->number_of_lms = get_topology_lm_number(drm_fd, out->conn_res.props->prop_values[j]);
-      printf("display %dx%d lms=%u\n", out->width, out->height, out->number_of_lms);
+      printf("display %dx%d lms=%u crtc=%u\n", out->width, out->height, out->number_of_lms, crtc->crtc_id);
+      fflush(stdout);
     }
   }
 
@@ -831,35 +963,43 @@ static bool b6q_init_display(drmModeRes *res, drmModeConnector *connector,
   if (!plane_options || !plane_options->planes) return false;
 
   uint32_t picked = 0;
-  for (uint32_t i = 0; i < plane_options->count_planes && picked < out->number_of_lms; ++i) {
-    drmModePlane *p = drmModeGetPlane(drm_fd, plane_options->planes[i]);
-    if (!p) continue;
-    if (!(p->possible_crtcs & (1u << crtc_index))) {
-      drmModeFreePlane(p);
-      continue;
-    }
-    drmModeObjectProperties *pprops = drmModeObjectGetProperties(drm_fd, p->plane_id, DRM_MODE_OBJECT_PLANE);
-    if (!pprops) {
-      drmModeFreePlane(p);
-      continue;
-    }
-    drmModePropertyRes **pinfo = static_cast<drmModePropertyRes **>(
-        calloc(pprops->count_props, sizeof(*pinfo)));
-    for (uint32_t j = 0; j < pprops->count_props; ++j)
-      pinfo[j] = drmModeGetProperty(drm_fd, pprops->props[j]);
+  for (int pass = 0; pass < 2 && picked < out->number_of_lms; ++pass) {
+    for (uint32_t i = 0; i < plane_options->count_planes && picked < out->number_of_lms; ++i) {
+      uint32_t pid = plane_options->planes[i];
+      if (pass == 0 && b6q_plane_excluded(pid, exclude_plane_ids, exclude_plane_count))
+        continue;
+      if (pass == 1 && !b6q_plane_excluded(pid, exclude_plane_ids, exclude_plane_count))
+        continue;
 
-    if (b6q_is_cursor_plane(drm_fd, pprops, pinfo)) {
-      for (uint32_t j = 0; j < pprops->count_props; ++j) drmModeFreeProperty(pinfo[j]);
-      free(pinfo);
-      drmModeFreeObjectProperties(pprops);
-      drmModeFreePlane(p);
-      continue;
-    }
+      drmModePlane *p = drmModeGetPlane(drm_fd, pid);
+      if (!p) continue;
+      if (!(p->possible_crtcs & (1u << crtc_index))) {
+        drmModeFreePlane(p);
+        continue;
+      }
+      drmModeObjectProperties *pprops = drmModeObjectGetProperties(drm_fd, p->plane_id, DRM_MODE_OBJECT_PLANE);
+      if (!pprops) {
+        drmModeFreePlane(p);
+        continue;
+      }
+      drmModePropertyRes **pinfo = static_cast<drmModePropertyRes **>(
+          calloc(pprops->count_props, sizeof(*pinfo)));
+      for (uint32_t j = 0; j < pprops->count_props; ++j)
+        pinfo[j] = drmModeGetProperty(drm_fd, pprops->props[j]);
 
-    out->plane_res[picked].plane = p;
-    out->plane_res[picked].props = pprops;
-    out->plane_res[picked].props_info = pinfo;
-    picked++;
+      if (b6q_is_cursor_plane(drm_fd, pprops, pinfo)) {
+        for (uint32_t j = 0; j < pprops->count_props; ++j) drmModeFreeProperty(pinfo[j]);
+        free(pinfo);
+        drmModeFreeObjectProperties(pprops);
+        drmModeFreePlane(p);
+        continue;
+      }
+
+      out->plane_res[picked].plane = p;
+      out->plane_res[picked].props = pprops;
+      out->plane_res[picked].props_info = pinfo;
+      picked++;
+    }
   }
   drmModeFreePlaneResources(plane_options);
 
@@ -1012,29 +1152,30 @@ static GRSurface* drm_init(minui_backend* backend __unused) {
     outer_conn = dsi_conns[0];
   }
 
-  if (!b6q_init_display(res, inner_conn, 0, &inner_disp)) {
+  if (!b6q_init_display(res, inner_conn, 0, nullptr, 0, &inner_disp)) {
     printf("Failed to init inner display\n");
+    fflush(stdout);
     drmModeFreeResources(res);
     close(drm_fd);
     return nullptr;
   }
 
   if (outer_conn) {
-    if (!b6q_init_display(res, outer_conn, inner_disp.crtc->crtc_id, &outer_disp)) {
+    uint32_t inner_pids[NUM_PLANES] = {0};
+    uint32_t inner_pcount = 0;
+    for (uint32_t i = 0; i < inner_disp.number_of_lms && i < NUM_PLANES; ++i) {
+      if (inner_disp.plane_res[i].plane) {
+        inner_pids[inner_pcount++] = inner_disp.plane_res[i].plane->plane_id;
+      }
+    }
+    if (!b6q_init_display(res, outer_conn, inner_disp.crtc->crtc_id, inner_pids, inner_pcount, &outer_disp)) {
       printf("Warning: failed to init outer display, continuing with inner only\n");
+      fflush(stdout);
       outer_disp.valid = false;
     }
   }
 
   b6q_drm_folded = outer_disp.valid ? b6q_read_folded_state() : false;
-  if (outer_disp.valid) {
-    struct B6qDrmDisplay *inactive = b6q_drm_folded ? &inner_disp : &outer_disp;
-    if (inactive->connector && inactive->connector->encoder_id != 0) {
-      b6q_activate_display_state(inactive);
-      current_blank_state = false;
-      drm_blank(nullptr, true);
-    }
-  }
   drmModeFreeResources(res);
 
   draw_buf = (GRSurface *)malloc(sizeof(GRSurface));
@@ -1053,10 +1194,29 @@ static GRSurface* drm_init(minui_backend* backend __unused) {
   }
 
   current_buffer = 0;
+  // First enable active display to complete cont_splash handoff
   b6q_activate_display_state(b6q_drm_folded ? &outer_disp : &inner_disp);
   b6q_apply_backlights(b6q_drm_folded);
   current_blank_state = true;
-  drm_blank(nullptr, false);
+  b6q_drm_set_blank(false);
+
+  // Then cycle inactive display (black FB + backlight 0 -> blank + DPMS OFF) so ABL bootloader warning clears
+  if (outer_disp.valid) {
+    struct B6qDrmDisplay *inactive = b6q_drm_folded ? &inner_disp : &outer_disp;
+    b6q_activate_display_state(inactive);
+    b6q_write_sysfs(b6q_drm_folded ? "/sys/class/backlight/panel0-backlight/brightness"
+                                   : "/sys/class/backlight/panel1-backlight/brightness", "0");
+    current_blank_state = true;
+    b6q_drm_set_blank(false);
+    b6q_write_sysfs(b6q_drm_folded ? "/sys/class/backlight/panel0-backlight/brightness"
+                                   : "/sys/class/backlight/panel1-backlight/brightness", "0");
+    current_blank_state = false;
+    b6q_drm_set_blank(true);
+
+    b6q_activate_display_state(b6q_drm_folded ? &outer_disp : &inner_disp);
+    current_blank_state = false;
+    b6q_set_dpms(0);
+  }
 
   return draw_buf;
 }
@@ -1064,16 +1224,27 @@ static GRSurface* drm_init(minui_backend* backend __unused) {
 static GRSurface* drm_flip(minui_backend* backend __unused) {
   bool want_folded = outer_disp.valid ? b6q_read_folded_state() : false;
   if (want_folded != b6q_drm_folded) {
+    bool prev_folded = b6q_drm_folded;
     bool was_blanked = current_blank_state;
+    printf("b6q: switching display folded %d -> %d\n", prev_folded ? 1 : 0, want_folded ? 1 : 0);
+    fflush(stdout);
     if (!was_blanked) {
-      drm_blank(nullptr, true);
+      b6q_drm_set_blank(true);
     }
     b6q_drm_folded = want_folded;
     b6q_activate_display_state(b6q_drm_folded ? &outer_disp : &inner_disp);
     b6q_copy_to_active_surface(drm_surfaces[current_buffer]);
     b6q_apply_backlights(b6q_drm_folded);
     if (!was_blanked) {
-      drm_blank(nullptr, false);
+      if (b6q_drm_set_blank(false) != 0) {
+        printf("b6q: failed to enable target display, reverting to %d\n", prev_folded ? 1 : 0);
+        fflush(stdout);
+        b6q_drm_folded = prev_folded;
+        b6q_activate_display_state(b6q_drm_folded ? &outer_disp : &inner_disp);
+        b6q_copy_to_active_surface(drm_surfaces[current_buffer]);
+        b6q_apply_backlights(b6q_drm_folded);
+        b6q_drm_set_blank(false);
+      }
     }
     current_buffer = 1 - current_buffer;
     return draw_buf;
@@ -1160,6 +1331,7 @@ def patch_twrp_functions(path: pathlib.Path) -> None:
 \t\t\tif (bval > 0 && sub_val < 200) sub_val = 200;
 \t\t\tif (sub_val > 7650) sub_val = 7650;
 \t\t\tTWFunc::write_to_file("/sys/class/backlight/panel0-backlight/brightness", "0");
+\t\t\tLOGINFO("TWFunc::Set_Brightness: folded sub brightness=%d\\n", sub_val);
 \t\t\tresult = TWFunc::write_to_file("/sys/class/backlight/panel1-backlight/brightness", std::to_string(sub_val));
 \t\t} else {
 \t\t\tTWFunc::write_to_file("/sys/class/backlight/panel1-backlight/brightness", "0");
@@ -1195,6 +1367,7 @@ def patch_gui(path: pathlib.Path) -> None:
 \t\t\tif (TWFunc::read_file("/sys/class/sec/hall_ic/flip_status", flip_val) == 0 && !flip_val.empty()) {
 \t\t\t\tint f = (flip_val[0] == '0') ? 1 : 0;
 \t\t\t\tif (b6q_last_fold != -1 && b6q_last_fold != f) {
+\t\t\t\t\tLOGINFO("b6q: fold state changed -> %d\\n", f);
 \t\t\t\t\tblankTimer.resetTimerAndUnblank();
 \t\t\t\t\tgForceRender.set_value(1);
 \t\t\t\t}
