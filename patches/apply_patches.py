@@ -425,18 +425,6 @@ static void b6q_apply_backlights(bool folded) {
   }
 }
 
-static void b6q_set_dpms(uint32_t dpms_mode) {
-  if (!main_monitor_connector || drm_fd < 0) return;
-  uint32_t prop_id = 0;
-  find_prop_id(&conn_res, connector, Connector, main_monitor_connector->connector_id, "DPMS", prop_id);
-  if (prop_id) {
-    int rc = drmModeConnectorSetProperty(drm_fd, main_monitor_connector->connector_id, prop_id, dpms_mode);
-    if (rc) {
-      printf("b6q: DPMS=%u failed rc=%d\n", dpms_mode, rc);
-    }
-  }
-}
-
 static void b6q_activate_display_state(struct B6qDrmDisplay *d) {
   main_monitor_connector = d->connector;
   main_monitor_crtc = d->crtc;
@@ -468,6 +456,19 @@ static void b6q_activate_display_state(struct B6qDrmDisplay *d) {
   find_prop_id(res, type, Type, id, id_name, prop_id); \
   if (prop_id)                                         \
     drmModeAtomicAddProperty(atomic_req, id, prop_id, id_val);
+
+static void b6q_set_dpms(uint32_t dpms_mode) {
+  if (!main_monitor_connector || drm_fd < 0) return;
+  uint32_t prop_id = 0;
+  find_prop_id(&conn_res, connector, Connector, main_monitor_connector->connector_id, "DPMS", prop_id);
+  if (prop_id) {
+    int rc = drmModeConnectorSetProperty(drm_fd, main_monitor_connector->connector_id, prop_id, dpms_mode);
+    if (rc) {
+      printf("b6q: DPMS=%u failed rc=%d\n", dpms_mode, rc);
+      fflush(stdout);
+    }
+  }
+}
 
 enum sde_rm_topology_name {
   SDE_RM_TOPOLOGY_NONE = 0,
