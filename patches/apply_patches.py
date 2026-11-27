@@ -44,6 +44,7 @@ static int b6q_vib_fd = -1;
 static int b6q_vib_effect_id = -1;
 static bool b6q_vib_ff_failed = false;
 static char b6q_vib_cont_path[256] = {0};
+static pthread_mutex_t b6q_fold_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile int b6q_folded_cached = 0;
 static struct timespec b6q_last_fold_poll = {0, 0};
 
@@ -101,31 +102,59 @@ static void b6q_ensure_vib_thread_locked(void) {
     }
 }
 
-static bool b6q_read_fold_sysfs(void) {
+static bool b6q_poll_fold_sensors(bool prev_folded) {
     int fd = open("/sys/class/sec/hall_ic/flip_status", O_RDONLY);
-    if (fd < 0) return false;
-    char buf[8] = {0};
-    ssize_t n = read(fd, buf, sizeof(buf) - 1);
-    close(fd);
-    if (n > 0 && buf[0] == '0') return true;
-    return false;
+    if (fd >= 0) {
+        char buf[8] = {0};
+        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n > 0 && buf[0] == '0') return true;
+    }
+
+    int dfd = open("/sys/class/sec/digital_hall/digital_hall_status", O_RDONLY);
+    if (dfd >= 0) {
+        char buf[64] = {0};
+        ssize_t n = read(dfd, buf, sizeof(buf) - 1);
+        close(dfd);
+        if (n > 0) {
+            int x = 0, y = 0, z = 0;
+            if (sscanf(buf, "%d,%d,%d", &x, &y, &z) == 3 &&
+                z < -2000 && z > -10000) {
+                if (!prev_folded) {
+                    return (x > -4100 && y < 250);
+                } else {
+                    return !(x < -4600 || y > 450);
+                }
+            }
+        }
+    }
+    return prev_folded;
 }
 
 static void b6q_set_folded(bool folded) {
+    pthread_mutex_lock(&b6q_fold_lock);
     b6q_folded_cached = folded ? 1 : 0;
     clock_gettime(CLOCK_MONOTONIC, &b6q_last_fold_poll);
+    pthread_mutex_unlock(&b6q_fold_lock);
 }
 
-static bool b6q_is_folded(void) {
+int b6q_is_device_folded(void) {
+    pthread_mutex_lock(&b6q_fold_lock);
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     long elapsed_ms = (now.tv_sec - b6q_last_fold_poll.tv_sec) * 1000L +
                       (now.tv_nsec - b6q_last_fold_poll.tv_nsec) / 1000000L;
-    if (b6q_last_fold_poll.tv_sec == 0 || elapsed_ms >= 100 || elapsed_ms < 0) {
-        b6q_folded_cached = b6q_read_fold_sysfs() ? 1 : 0;
+    if (b6q_last_fold_poll.tv_sec == 0 || elapsed_ms >= 250 || elapsed_ms < 0) {
+        b6q_folded_cached = b6q_poll_fold_sensors(b6q_folded_cached != 0) ? 1 : 0;
         b6q_last_fold_poll = now;
     }
-    return b6q_folded_cached != 0;
+    int res = b6q_folded_cached;
+    pthread_mutex_unlock(&b6q_fold_lock);
+    return res;
+}
+
+static bool b6q_is_folded(void) {
+    return b6q_is_device_folded() != 0;
 }
 """
     src = src.replace(inc_target, helpers, 1)
@@ -377,12 +406,7 @@ static struct B6qDrmDisplay outer_disp;
 static bool b6q_drm_folded = false;
 
 static bool b6q_read_folded_state(void) {
-  int fd = open("/sys/class/sec/hall_ic/flip_status", O_RDONLY);
-  if (fd < 0) return false;
-  char buf[8] = {0};
-  ssize_t n = read(fd, buf, sizeof(buf) - 1);
-  close(fd);
-  return (n > 0 && buf[0] == '0');
+  return b6q_is_device_folded() != 0;
 }
 
 static void b6q_write_sysfs(const char *path, const char *val) {
@@ -1327,6 +1351,16 @@ def patch_twrp_functions(path: pathlib.Path) -> None:
 \t\tstd::string flip_state;
 \t\tbool folded = (TWFunc::read_file("/sys/class/sec/hall_ic/flip_status", flip_state) == 0 &&
 \t\t               !flip_state.empty() && flip_state[0] == '0');
+\t\tif (!folded) {
+\t\t\tstd::string dhall;
+\t\t\tif (TWFunc::read_file("/sys/class/sec/digital_hall/digital_hall_status", dhall) == 0) {
+\t\t\t\tint hx = 0, hy = 0, hz = 0;
+\t\t\t\tif (sscanf(dhall.c_str(), "%d,%d,%d", &hx, &hy, &hz) == 3 &&
+\t\t\t\t    hz < -2000 && hz > -10000 && hx > -4300 && hy < 300) {
+\t\t\t\t\tfolded = true;
+\t\t\t\t}
+\t\t\t}
+\t\t}
 \t\tif (folded) {
 \t\t\tint sub_val = (bval <= 0) ? 0 : (bval * 7650) / 12750;
 \t\t\tif (bval > 0 && sub_val < 200) sub_val = 200;
@@ -1352,6 +1386,19 @@ def patch_twrp_functions(path: pathlib.Path) -> None:
     print(f"Patched {path}")
 
 
+def patch_minui_h(path: pathlib.Path) -> None:
+    src = path.read_text(encoding="utf-8")
+    if "b6q_is_device_folded" in src:
+        print(f"{path} already patched.")
+        return
+    anchor = "int vibrate(int timeout_ms);"
+    if anchor not in src:
+        raise SystemExit(f"ERROR: vibrate decl anchor not found in {path}")
+    src = src.replace(anchor, anchor + "\nint b6q_is_device_folded(void);", 1)
+    path.write_text(src, encoding="utf-8")
+    print(f"Patched {path}")
+
+
 def patch_gui(path: pathlib.Path) -> None:
     src = path.read_text(encoding="utf-8")
     if "b6q_last_fold" in src:
@@ -1364,20 +1411,22 @@ def patch_gui(path: pathlib.Path) -> None:
 
     repl = """\t\t{
 \t\t\tstatic int b6q_last_fold = -1;
-\t\t\tstd::string flip_val;
-\t\t\tif (TWFunc::read_file("/sys/class/sec/hall_ic/flip_status", flip_val) == 0 && !flip_val.empty()) {
-\t\t\t\tint f = (flip_val[0] == '0') ? 1 : 0;
-\t\t\t\tif (b6q_last_fold != -1 && b6q_last_fold != f) {
-\t\t\t\t\tLOGINFO("b6q: fold state changed -> %d\\n", f);
-\t\t\t\t\tblankTimer.resetTimerAndUnblank();
-\t\t\t\t\tgForceRender.set_value(1);
-\t\t\t\t}
-\t\t\t\tb6q_last_fold = f;
+\t\t\tint f = b6q_is_device_folded() ? 1 : 0;
+\t\t\tif (b6q_last_fold != -1 && b6q_last_fold != f) {
+\t\t\t\tLOGINFO("b6q: fold state changed -> %d\\n", f);
+\t\t\t\tblankTimer.resetTimerAndUnblank();
+\t\t\t\tgForceRender.set_value(1);
 \t\t\t}
+\t\t\tb6q_last_fold = f;
 \t\t}
 
 \t\tif (!gForceRender.get_value())"""
     src = src.replace(anchor, repl, 1)
+
+    timeout_anchor = "\t\t\tinput_timeout_ms = idle_frames > 15 ? 1000 : 0;"
+    if timeout_anchor in src:
+        src = src.replace(timeout_anchor, "\t\t\tinput_timeout_ms = idle_frames > 15 ? 300 : 0;", 1)
+
     path.write_text(src, encoding="utf-8")
     print(f"Patched {path}")
 
@@ -1386,6 +1435,7 @@ def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit(f"Usage: {sys.argv[0]} <path/to/bootable/recovery>")
     rec_dir = pathlib.Path(sys.argv[1])
+    patch_minui_h(rec_dir / "minuitwrp" / "include" / "minuitwrp" / "minui.h")
     patch_events(rec_dir / "minuitwrp" / "events.cpp")
     patch_graphics_drm(rec_dir / "minuitwrp" / "graphics_drm.cpp")
     patch_twrp_functions(rec_dir / "twrp-functions.cpp")
