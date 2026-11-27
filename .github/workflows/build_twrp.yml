@@ -86,6 +86,10 @@ jobs:
             --flags 3 --padding_size 4096 \
             --output "$GITHUB_WORKSPACE/release/vbmeta.img"
           tar -H ustar -c -C "$GITHUB_WORKSPACE/release" -f "$GITHUB_WORKSPACE/release/vbmeta_disabled_b6q.tar" vbmeta.img
+
+          # Combined Odin tar.md5 (recovery.img + vbmeta.img)
+          tar -H ustar -c -C "$GITHUB_WORKSPACE/release" -f "$GITHUB_WORKSPACE/release/twrp_b6q_F741BXXS2CYL5_odin.tar" recovery.img vbmeta.img
+          (cd "$GITHUB_WORKSPACE/release" && md5sum -t twrp_b6q_F741BXXS2CYL5_odin.tar >> twrp_b6q_F741BXXS2CYL5_odin.tar && mv twrp_b6q_F741BXXS2CYL5_odin.tar twrp_b6q_F741BXXS2CYL5_odin.tar.md5)
           ls -lh "$GITHUB_WORKSPACE/release"
 
       - name: Upload artifacts

@@ -79,6 +79,21 @@ TARGET_RECOVERY_FSTAB := $(DEVICE_PATH)/recovery/root/system/etc/recovery.fstab
 TARGET_RECOVERY_PIXEL_FORMAT := RGBX_8888
 TARGET_RECOVERY_QCOM_RTC_FIX := true
 BOARD_HAS_NO_SELECT_BUTTON := true
+BOARD_ROOT_EXTRA_FOLDERS := \
+    cache \
+    carrier \
+    data_mirror \
+    efs \
+    linkerconfig \
+    odm_dlkm \
+    oem \
+    optics \
+    postinstall \
+    prism \
+    second_stage_resources \
+    spu \
+    system_ext \
+    vendor_dlkm
 
 # AVB
 BOARD_AVB_ENABLE := true
@@ -93,11 +108,11 @@ PLATFORM_SECURITY_PATCH := 2026-01-01
 VENDOR_SECURITY_PATCH := 2026-01-01
 BOOT_SECURITY_PATCH := 2026-01-01
 
-# Crypto / FBE
-TW_INCLUDE_CRYPTO := true
-TW_INCLUDE_CRYPTO_FBE := true
-TW_INCLUDE_FBE_METADATA_DECRYPT := true
-TW_USE_FSCRYPT_POLICY := 2
+# Crypto / FBE (disabled; avoids hanging on missing Android 14/16 KeyMint/Gatekeeper HALs)
+TW_INCLUDE_CRYPTO := false
+TW_INCLUDE_CRYPTO_FBE := false
+BOARD_USES_QCOM_FBE_DECRYPTION := false
+TW_INCLUDE_FBE_METADATA_DECRYPT := false
 
 # TWRP UI & Hardware (SM-F741B main display: 1080x2640)
 TW_THEME := portrait_hdpi
@@ -120,6 +135,8 @@ TW_INCLUDE_RESETPROP := true
 TW_INCLUDE_LIBRESETPROP := true
 TW_USE_NEW_MINADBD := true
 TW_EXCLUDE_APEX := true
+TW_EXCLUDE_DEFAULT_USB_INIT := true
+TW_USE_LEGACY_BATTERY_SERVICES := true
 TW_ENABLE_FS_COMPRESSION := true
 TW_DEFAULT_LANGUAGE := en
 TW_EXTRA_LANGUAGES := true

@@ -12,13 +12,6 @@ ro.minui.pixel_format=RGBX_8888
 ro.sf.lcd_density=480
 ro.surface_flinger.sub_lcd_density=340
 
-# Crypto / Gatekeeper / Keystore
-ro.crypto.metadata_init_delete_all_keys.enabled=true
-vendor.gatekeeper.is_security_level_spu=0
-ro.hardware.keystore=mdfpp
-ro.hardware.gatekeeper=mdfpp
-ro.hardware.keystore_desede=true
-
 # Platform
 ro.product.board=pineapple
 ro.board.platform=pineapple

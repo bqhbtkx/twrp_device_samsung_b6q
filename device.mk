@@ -22,11 +22,6 @@ PRODUCT_DEFAULT_PROPERTY_OVERRIDES += \
     ro.minui.pixel_format=RGBX_8888 \
     ro.sf.lcd_density=480 \
     ro.surface_flinger.sub_lcd_density=340 \
-    ro.crypto.metadata_init_delete_all_keys.enabled=true \
-    vendor.gatekeeper.is_security_level_spu=0 \
-    ro.hardware.keystore=mdfpp \
-    ro.hardware.gatekeeper=mdfpp \
-    ro.hardware.keystore_desede=true \
     ro.product.board=pineapple \
     ro.board.platform=pineapple \
     ro.soc.manufacturer=QTI \
@@ -34,6 +29,7 @@ PRODUCT_DEFAULT_PROPERTY_OVERRIDES += \
 
 # Enable fastbootd
 PRODUCT_PACKAGES += \
+    android.hardware.fastboot@1.0-impl-mock \
     fastbootd
 
 # Recovery fstab & TWRP flags
@@ -45,7 +41,7 @@ PRODUCT_COPY_FILES += \
 PRODUCT_COPY_FILES += \
     $(DEVICE_PATH)/recovery/root/init.recovery.qcom.rc:$(TARGET_COPY_OUT_RECOVERY)/root/init.recovery.qcom.rc \
     $(DEVICE_PATH)/recovery/root/init.recovery.samsung.rc:$(TARGET_COPY_OUT_RECOVERY)/root/init.recovery.samsung.rc \
-    $(DEVICE_PATH)/recovery/root/init.recovery.b6q.rc:$(TARGET_COPY_OUT_RECOVERY)/root/init.recovery.b6q.rc
+    $(DEVICE_PATH)/recovery/root/init.recovery.usb.rc:$(TARGET_COPY_OUT_RECOVERY)/root/init.recovery.usb.rc
 
 # Prebuilt stock recovery kernel modules (including synaptics_spi_fold, synaptics_i2c_fold, msm_drm, ufs_qcom, dwc3-msm)
 RECOVERY_MODULES_PATH := $(DEVICE_PATH)/prebuilt/modules
