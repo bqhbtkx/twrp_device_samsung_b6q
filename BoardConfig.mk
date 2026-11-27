@@ -125,6 +125,7 @@ TARGET_USE_CUSTOM_LUN_FILE_PATH := /config/usb_gadget/g1/functions/mass_storage.
 TW_NO_LEGACY_PROPS := true
 RECOVERY_SDCARD_ON_DATA := true
 BOARD_SUPPRESS_SECURE_ERASE := true
+BUILD_BROKEN_ELF_PREBUILT_PRODUCT_COPY_FILES := true
 
 # Logcat / Debug
 TWRP_INCLUDE_LOGCAT := true
