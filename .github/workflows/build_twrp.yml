@@ -65,6 +65,7 @@ jobs:
           mkdir -p "$BUILD_ROOT/device/samsung"
           rm -rf "$BUILD_ROOT/device/samsung/b6q"
           cp -a "$GITHUB_WORKSPACE/dt_b6q" "$BUILD_ROOT/device/samsung/b6q"
+          python3 "$BUILD_ROOT/device/samsung/b6q/patches/patch_events.py" "$BUILD_ROOT/bootable/recovery/minuitwrp/events.cpp"
 
       - name: Build TWRP recoveryimage
         run: |

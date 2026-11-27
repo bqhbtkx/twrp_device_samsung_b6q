@@ -120,8 +120,8 @@ DEVICE_SCREEN_WIDTH := 1080
 DEVICE_SCREEN_HEIGHT := 2640
 TW_FRAMERATE := 60
 TW_BRIGHTNESS_PATH := "/sys/class/backlight/panel0-backlight/brightness"
-TW_MAX_BRIGHTNESS := 255
-TW_DEFAULT_BRIGHTNESS := 150
+TW_MAX_BRIGHTNESS := 12750
+TW_DEFAULT_BRIGHTNESS := 4000
 TW_NO_SCREEN_BLANK := true
 
 # TWRP Features
@@ -140,7 +140,6 @@ TW_USE_LEGACY_BATTERY_SERVICES := true
 TW_ENABLE_FS_COMPRESSION := true
 TW_DEFAULT_LANGUAGE := en
 TW_EXTRA_LANGUAGES := true
-TW_INPUT_BLACKLIST := "hbtp_vm\x0aals_rear\x0aakm-digital-hall\x0acertify_hall\x0aflip\x0ameta_event\x0asec_touchpad\x0asec_touchproximity\x0asec_touchproximity2\x0asec_touchscreen2\x0asec_vibrator_inputff"
 
 # Samsung / Recovery specifics
 TARGET_USE_CUSTOM_LUN_FILE_PATH := /config/usb_gadget/g1/functions/mass_storage.0/lun.%d/file
