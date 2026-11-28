@@ -11,3 +11,4 @@ on boot
     # Unlock Samsung usb_notify_layer secure lock so USB OTG flash drives and HID mice work in TWRP
     wait /sys/class/usb_notify/usb_control/usb_sl 5
     write /sys/class/usb_notify/usb_control/usb_sl SUNNY_WORK_MODE
+    write /sys/class/usb_notify/usb_control/usb_maximum_speed "super-speed"
