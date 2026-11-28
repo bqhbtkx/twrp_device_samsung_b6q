@@ -47,6 +47,9 @@ static char b6q_vib_cont_path[256] = {0};
 static pthread_mutex_t b6q_fold_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile int b6q_folded_cached = 0;
 static struct timespec b6q_last_fold_poll = {0, 0};
+static pthread_mutex_t b6q_cover_lock = PTHREAD_MUTEX_INITIALIZER;
+static int b6q_cover_view_y = 0;
+static int b6q_cover_scroll_dirty = 0;
 
 static void b6q_write_cont(const char *val) {
     if (b6q_vib_cont_path[0] == '\\0') return;
@@ -155,6 +158,38 @@ int b6q_is_device_folded(void) {
 
 static bool b6q_is_folded(void) {
     return b6q_is_device_folded() != 0;
+}
+
+int b6q_get_cover_view_y(void) {
+    pthread_mutex_lock(&b6q_cover_lock);
+    int v = b6q_cover_view_y;
+    pthread_mutex_unlock(&b6q_cover_lock);
+    return v;
+}
+
+void b6q_cover_scroll(int delta_y) {
+    int fbw = gr_fb_width();
+    int fbh = gr_fb_height();
+    int slice_h = (fbw > 0) ? (748 * fbw) / 720 : 1122;
+    if (fbh > 0 && slice_h > fbh) slice_h = fbh;
+    int max_y = (fbh > slice_h) ? (fbh - slice_h) : 0;
+    pthread_mutex_lock(&b6q_cover_lock);
+    int nv = b6q_cover_view_y + delta_y;
+    if (nv < 0) nv = 0;
+    if (nv > max_y) nv = max_y;
+    if (nv != b6q_cover_view_y) {
+        b6q_cover_view_y = nv;
+        b6q_cover_scroll_dirty = 1;
+    }
+    pthread_mutex_unlock(&b6q_cover_lock);
+}
+
+int b6q_consume_cover_scroll_dirty(void) {
+    pthread_mutex_lock(&b6q_cover_lock);
+    int d = b6q_cover_scroll_dirty;
+    b6q_cover_scroll_dirty = 0;
+    pthread_mutex_unlock(&b6q_cover_lock);
+    return d;
 }
 """
     src = src.replace(inc_target, helpers, 1)
@@ -350,8 +385,48 @@ static bool b6q_is_folded(void) {
     if (strcmp(e->deviceName, "sec_touchscreen") == 0 && cur_folded)
         return 1;
     if (strcmp(e->deviceName, "sec_touchscreen2") == 0 && !cur_folded)
-        return 1;"""
+        return 1;
+
+    static int b6q_power_down = 0;
+    if (ev->type == EV_KEY) {
+        if (ev->code == KEY_POWER) {
+            b6q_power_down = (ev->value != 0);
+        } else if (cur_folded && !b6q_power_down &&
+                   (ev->code == KEY_VOLUMEUP || ev->code == KEY_VOLUMEDOWN)) {
+            if (ev->value == 1) {
+                b6q_cover_scroll(ev->code == KEY_VOLUMEUP ? -506 : 506);
+                ev->code = KEY_RESERVED;
+                ev->value = 0;
+                return 0;
+            }
+            return 1;
+        }
+    }
+
+    if (strcmp(e->deviceName, "sec_touchscreen") == 0 ||
+        strcmp(e->deviceName, "sec_touchscreen2") == 0) {
+        use_tracking_id_negative_as_touch_release = 1;
+    }"""
     src = src.replace(vk_mod_anchor, vk_mod_repl, 1)
+
+    # 7. Map folded cover screen touch (sec_touchscreen2) to visible 1080x1122 viewport slice
+    tp_anchor = """    *x = (p->x - p->xi.minimum) * (fb_width - 1) / (p->xi.maximum - p->xi.minimum);
+    *y = (p->y - p->yi.minimum) * (fb_height - 1) / (p->yi.maximum - p->yi.minimum);"""
+    if tp_anchor not in src:
+        raise SystemExit(f"ERROR: vk_tp_to_screen anchor not found in {path}")
+    tp_repl = """    if (b6q_is_folded()) {
+        int slice_h = (fb_width > 0) ? (748 * fb_width) / 720 : 1122;
+        if (slice_h > fb_height) slice_h = fb_height;
+        int view_y = b6q_get_cover_view_y();
+        if (view_y > fb_height - slice_h) view_y = fb_height - slice_h;
+        if (view_y < 0) view_y = 0;
+        *x = (int)(((long long)(p->x - p->xi.minimum) * (fb_width - 1)) / (p->xi.maximum - p->xi.minimum));
+        *y = view_y + (int)(((long long)(p->y - p->yi.minimum) * (slice_h - 1)) / (p->yi.maximum - p->yi.minimum));
+    } else {
+        *x = (int)(((long long)(p->x - p->xi.minimum) * (fb_width - 1)) / (p->xi.maximum - p->xi.minimum));
+        *y = (int)(((long long)(p->y - p->yi.minimum) * (fb_height - 1)) / (p->yi.maximum - p->yi.minimum));
+    }"""
+    src = src.replace(tp_anchor, tp_repl, 1)
 
     path.write_text(src, encoding="utf-8")
     print(f"Patched {path}")
@@ -1076,6 +1151,21 @@ static void update_plane_fb() {
     printf("Atomic commit failed ret=%d\n", ret);
 }
 
+static inline uint32_t b6q_bilerp_rgba(uint32_t p00, uint32_t p10, uint32_t p01, uint32_t p11,
+                                         uint32_t wx, uint32_t wy) {
+  uint32_t iwx = 256u - wx;
+  uint32_t iwy = 256u - wy;
+  uint32_t w00 = iwx * iwy;
+  uint32_t w10 = wx * iwy;
+  uint32_t w01 = iwx * wy;
+  uint32_t w11 = wx * wy;
+  uint32_t c0 = (((p00 & 0xFFu) * w00 + (p10 & 0xFFu) * w10 + (p01 & 0xFFu) * w01 + (p11 & 0xFFu) * w11 + 32768u) >> 16) & 0xFFu;
+  uint32_t c1 = ((((p00 >> 8) & 0xFFu) * w00 + ((p10 >> 8) & 0xFFu) * w10 + ((p01 >> 8) & 0xFFu) * w01 + ((p11 >> 8) & 0xFFu) * w11 + 32768u) >> 16) & 0xFFu;
+  uint32_t c2 = ((((p00 >> 16) & 0xFFu) * w00 + ((p10 >> 16) & 0xFFu) * w10 + ((p01 >> 16) & 0xFFu) * w01 + ((p11 >> 16) & 0xFFu) * w11 + 32768u) >> 16) & 0xFFu;
+  uint32_t c3 = ((((p00 >> 24) & 0xFFu) * w00 + ((p10 >> 24) & 0xFFu) * w10 + ((p01 >> 24) & 0xFFu) * w01 + ((p11 >> 24) & 0xFFu) * w11 + 32768u) >> 16) & 0xFFu;
+  return c0 | (c1 << 8) | (c2 << 16) | (c3 << 24);
+}
+
 static void b6q_copy_to_active_surface(drm_surface *dst_surf) {
   if (!dst_surf || !dst_surf->base.data || !draw_buf || !draw_buf->data) return;
 
@@ -1093,13 +1183,52 @@ static void b6q_copy_to_active_surface(drm_surface *dst_surf) {
   const uint32_t *src = reinterpret_cast<const uint32_t *>(draw_buf->data);
   uint32_t *dst = reinterpret_cast<uint32_t *>(dst_surf->base.data);
 
+  // Preserve 1:1 pixel aspect ratio by fitting width (1080 -> 720, scale 2/3)
+  // and showing a scrollable vertical slice (1122 rows out of 2640).
+  int slice_h = (dst_h * src_w) / dst_w;
+  if (slice_h > src_h) slice_h = src_h;
+  if (slice_h < 1) slice_h = 1;
+  int max_view_y = src_h - slice_h;
+  int view_y = b6q_get_cover_view_y();
+  if (view_y < 0) view_y = 0;
+  if (view_y > max_view_y) view_y = max_view_y;
+
+  int max_sx = src_w - 1;
+  int max_sy = src_h - 1;
   for (int dy = 0; dy < dst_h; ++dy) {
-    int sy = (dy * src_h) / dst_h;
-    const uint32_t *srow = src + sy * src_stride;
+    int y_q8 = (view_y << 8) + (((dy * 2 + 1) * slice_h * 128) / dst_h) - 128;
+    if (y_q8 < (view_y << 8)) y_q8 = (view_y << 8);
+    if (y_q8 > (max_sy << 8)) y_q8 = (max_sy << 8);
+    int sy0 = y_q8 >> 8;
+    int sy1 = (sy0 < max_sy) ? (sy0 + 1) : sy0;
+    uint32_t wy = static_cast<uint32_t>(y_q8 & 0xFF);
+    const uint32_t *r0 = src + sy0 * src_stride;
+    const uint32_t *r1 = src + sy1 * src_stride;
     uint32_t *drow = dst + dy * dst_stride;
+
     for (int dx = 0; dx < dst_w; ++dx) {
-      int sx = (dx * src_w) / dst_w;
-      drow[dx] = srow[sx];
+      int x_q8 = (((dx * 2 + 1) * src_w * 128) / dst_w) - 128;
+      if (x_q8 < 0) x_q8 = 0;
+      if (x_q8 > (max_sx << 8)) x_q8 = (max_sx << 8);
+      int sx0 = x_q8 >> 8;
+      int sx1 = (sx0 < max_sx) ? (sx0 + 1) : sx0;
+      uint32_t wx = static_cast<uint32_t>(x_q8 & 0xFF);
+      drow[dx] = b6q_bilerp_rgba(r0[sx0], r0[sx1], r1[sx0], r1[sx1], wx, wy);
+    }
+  }
+
+  // Draw right-edge vertical scrollbar indicator so scroll position is always clear
+  if (slice_h < src_h && dst_w >= 8) {
+    int thumb_y = (view_y * dst_h) / src_h;
+    int thumb_h = (slice_h * dst_h) / src_h;
+    if (thumb_h < 24) thumb_h = 24;
+    if (thumb_y + thumb_h > dst_h) thumb_y = dst_h - thumb_h;
+    for (int dy = 0; dy < dst_h; ++dy) {
+      uint32_t *drow = dst + dy * dst_stride;
+      uint32_t col = (dy >= thumb_y && dy < thumb_y + thumb_h) ? 0xFFE8E8E8u : 0xFF282828u;
+      for (int dx = dst_w - 5; dx < dst_w - 1; ++dx) {
+        drow[dx] = col;
+      }
     }
   }
 }
@@ -1394,7 +1523,14 @@ def patch_minui_h(path: pathlib.Path) -> None:
     anchor = "int vibrate(int timeout_ms);"
     if anchor not in src:
         raise SystemExit(f"ERROR: vibrate decl anchor not found in {path}")
-    src = src.replace(anchor, anchor + "\nint b6q_is_device_folded(void);", 1)
+    decls = (
+        anchor
+        + "\nint b6q_is_device_folded(void);"
+        + "\nint b6q_get_cover_view_y(void);"
+        + "\nvoid b6q_cover_scroll(int delta_y);"
+        + "\nint b6q_consume_cover_scroll_dirty(void);"
+    )
+    src = src.replace(anchor, decls, 1)
     path.write_text(src, encoding="utf-8")
     print(f"Patched {path}")
 
@@ -1414,10 +1550,17 @@ def patch_gui(path: pathlib.Path) -> None:
 \t\t\tint f = b6q_is_device_folded() ? 1 : 0;
 \t\t\tif (b6q_last_fold != -1 && b6q_last_fold != f) {
 \t\t\t\tLOGINFO("b6q: fold state changed -> %d\\n", f);
+\t\t\t\tif (f) {
+\t\t\t\t\tb6q_cover_scroll(-10000);
+\t\t\t\t}
 \t\t\t\tblankTimer.resetTimerAndUnblank();
 \t\t\t\tgForceRender.set_value(1);
 \t\t\t}
 \t\t\tb6q_last_fold = f;
+\t\t\tif (b6q_consume_cover_scroll_dirty()) {
+\t\t\t\tblankTimer.resetTimerAndUnblank();
+\t\t\t\tgForceRender.set_value(1);
+\t\t\t}
 \t\t}
 
 \t\tif (!gForceRender.get_value())"""
