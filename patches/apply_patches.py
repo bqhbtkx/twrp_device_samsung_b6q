@@ -22,15 +22,21 @@ def patch_events(path: pathlib.Path) -> None:
         print(f"{path} already patched.")
         return
 
-    # 1. Include <pthread.h> and <time.h> and add fold + vibrator helpers
+    # 1. Include <pthread.h>, <time.h>, <errno.h> and place b6q helpers after minui.h
     inc_target = "#include <fstream>\n"
     if inc_target not in src:
         raise SystemExit(f"ERROR: include anchor not found in {path}")
+    src = src.replace(
+        inc_target,
+        "#include <fstream>\n#include <errno.h>\n#include <pthread.h>\n#include <time.h>\n",
+        1,
+    )
 
-    helpers = """#include <fstream>
-#include <errno.h>
-#include <pthread.h>
-#include <time.h>
+    minui_target = '#include "minuitwrp/minui.h"\n'
+    if minui_target not in src:
+        raise SystemExit(f"ERROR: minui.h anchor not found in {path}")
+
+    helpers = """#include "minuitwrp/minui.h"
 
 static pthread_mutex_t b6q_vib_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t b6q_vib_cond;
@@ -192,7 +198,7 @@ int b6q_consume_cover_scroll_dirty(void) {
     return d;
 }
 """
-    src = src.replace(inc_target, helpers, 1)
+    src = src.replace(minui_target, helpers, 1)
 
     # 2. Replace vibrate() body to support sec_vibrator_inputff (FF_CONSTANT or cont sysfs)
     vib_anchor = """int vibrate(int timeout_ms)
